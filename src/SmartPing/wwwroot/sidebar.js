@@ -36,7 +36,7 @@
     icon.setAttribute('aria-hidden', 'true');
 
     const frame = document.createElementNS(svgNamespace, 'path');
-    frame.setAttribute('d', 'M8 4H4v16h4');
+    frame.setAttribute('d', className === 'sidebar-edge' ? '' : 'M8 4H4v16h4');
     const arrow = document.createElementNS(svgNamespace, 'path');
     arrow.classList.add('sidebar-toggle-arrow');
     icon.append(frame, arrow);
@@ -60,6 +60,13 @@
   breadcrumbs.before(leading);
   leading.append(topbarButton, breadcrumbs);
 
+  const edgeButton = createToggle('sidebar-edge');
+  document.body.append(edgeButton);
+
+  function expandedFocusControl() {
+    return mobile.matches ? sidebar.querySelector('.nav-link') || topbarButton : closeButton;
+  }
+
   function syncControls() {
     root.dataset.sidebarCollapsed = String(collapsed);
     sidebar.inert = collapsed;
@@ -67,15 +74,16 @@
     else sidebar.removeAttribute('aria-hidden');
 
     const label = collapsed ? '展开侧边栏' : '收起侧边栏';
-    for (const button of [closeButton, topbarButton]) {
+    for (const button of [closeButton, topbarButton, edgeButton]) {
       button.setAttribute('aria-expanded', String(!collapsed));
       button.setAttribute('aria-label', label);
       button.title = label;
-      button.querySelector('.sidebar-toggle-arrow').setAttribute('d', collapsed
-        ? 'M12 7l5 5-5 5M9 12h8'
-        : 'M16 7l-5 5 5 5M11 12h8');
+      button.querySelector('.sidebar-toggle-arrow').setAttribute('d', button === edgeButton
+        ? 'M9 6l6 6-6 6'
+        : collapsed ? 'M12 7l5 5-5 5M9 12h8' : 'M16 7l-5 5 5 5M11 12h8');
     }
     topbarButton.hidden = !collapsed && !mobile.matches;
+    edgeButton.hidden = !collapsed;
   }
 
   function setCollapsed(value, focusControl = false) {
@@ -86,20 +94,24 @@
     } catch { /* A private or restricted browser session may deny storage. */ }
 
     if (focusControl) {
-      (collapsed || mobile.matches ? topbarButton : closeButton).focus({ preventScroll: true });
+      (collapsed ? edgeButton : expandedFocusControl()).focus({ preventScroll: true });
     }
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => window.dispatchEvent(new Event('resize')), reducedMotion.matches ? 0 : 240);
   }
 
   mobile.addEventListener('change', () => {
-    const restoreFocus = document.activeElement === topbarButton;
+    const activeControl = document.activeElement;
     syncControls();
-    if (restoreFocus && topbarButton.hidden) closeButton.focus({ preventScroll: true });
+    if ((activeControl === topbarButton && topbarButton.hidden)
+      || (activeControl === closeButton && mobile.matches)) {
+      (collapsed ? edgeButton : expandedFocusControl()).focus({ preventScroll: true });
+    }
   });
   window.addEventListener('storage', event => {
     if (event.key !== storageKey) return;
-    const restoreFocus = sidebar.contains(document.activeElement) || document.activeElement === topbarButton;
+    const restoreFocus = sidebar.contains(document.activeElement)
+      || document.activeElement === topbarButton || document.activeElement === edgeButton;
     setCollapsed(event.newValue === 'true', restoreFocus);
   });
 
