@@ -183,6 +183,118 @@ try {
         $futureSample.Count -eq 1 -and [DateTimeOffset]$futureSample[0].timestamp -le [DateTimeOffset]::UtcNow) `
         'Small Agent clock skew is clamped to server time and remains visible in history'
 
+    # Paused targets on a synthetic Agent keep average regressions independent of live probe timing.
+    $averageNodeId = 'integration-average-fixture'
+    $emptyAverageNodeId = 'integration-average-empty'
+    foreach ($fixtureNodeId in @($averageNodeId, $emptyAverageNodeId)) {
+        $registration = @{ id = $fixtureNodeId; name = $fixtureNodeId; address = '127.0.0.1' }
+        Assert-Check ((Invoke-Api '/api/agent/register' 'POST' $registration $agentToken).StatusCode -eq 200) `
+            "Average fixture Agent $fixtureNodeId registers"
+    }
+    $averageTargets = @{}
+    foreach ($fixture in @(
+        @{ key = 'mixed'; protocol = 'tcp'; port = 443 },
+        @{ key = 'suspectOnly'; protocol = 'tcp'; port = 444 },
+        @{ key = 'icmp'; protocol = 'icmp'; port = 443 }
+    )) {
+        $request = @{
+            name = "Average fixture $($fixture.key)"; host = '127.0.0.1'; protocol = $fixture.protocol
+            port = $fixture.port; intervalSeconds = 3600; timeoutMs = 2000; retransmitThresholdMs = 100
+            nodeIds = @($averageNodeId); group = 'Average regression'; enabled = $false
+        }
+        $response = Invoke-Api '/api/targets' 'POST' $request
+        Assert-Check ($response.StatusCode -eq 201 -and -not $response.Body.enabled) `
+            "Paused $($fixture.key) average fixture is created"
+        $averageTargets[$fixture.key] = $response.Body
+    }
+    $averageTimestamp = [DateTimeOffset]::UtcNow.AddSeconds(-1).ToString('o')
+    $averageSamples = @(
+        @{ targetId = $averageTargets.mixed.id; latencyMs = 10; success = $true },
+        @{ targetId = $averageTargets.mixed.id; latencyMs = 30; success = $true },
+        @{ targetId = $averageTargets.mixed.id; latencyMs = 500; success = $true },
+        @{ targetId = $averageTargets.mixed.id; latencyMs = $null; success = $false },
+        @{ targetId = $averageTargets.suspectOnly.id; latencyMs = 500; success = $true },
+        @{ targetId = $averageTargets.icmp.id; latencyMs = 100; success = $true },
+        @{ targetId = $averageTargets.icmp.id; latencyMs = 100; success = $true }
+    )
+    foreach ($sample in $averageSamples) {
+        $sample.id = [Guid]::NewGuid().ToString('N')
+        $sample.nodeId = $averageNodeId
+        $sample.timestamp = $averageTimestamp
+        $sample.suspectedRetransmit = $false
+    }
+    $averageReport = Invoke-Api '/api/agent/report' 'POST' @{ nodeId = $averageNodeId; samples = $averageSamples } $agentToken
+    Assert-Check ($averageReport.StatusCode -eq 200 -and $averageReport.Body.accepted -eq 7) `
+        'All seven deterministic average fixture samples are accepted'
+
+    $mixedHistory = Get-History $averageTargets.mixed.id
+    Assert-Check ($mixedHistory.stats.avgLatencyMs -eq 20 -and $mixedHistory.stats.avgLatencySampleCount -eq 2) `
+        'TCP average excludes suspected retransmits and exposes the two eligible samples'
+    Assert-Check ($mixedHistory.stats.sent -eq 4 -and $mixedHistory.stats.received -eq 3 -and
+        $mixedHistory.stats.lossPercent -eq 25 -and $mixedHistory.stats.retransmitPercent -eq 25) `
+        'Excluding retransmits from TCP average preserves sent, received, loss and retransmit counts'
+    Assert-Check ($mixedHistory.stats.minLatencyMs -eq 10 -and $mixedHistory.stats.maxLatencyMs -eq 500 -and
+        @($mixedHistory.recent | Where-Object { $_.latencyMs -eq 500 -and $_.success -and $_.suspectedRetransmit }).Count -eq 1) `
+        'TCP extrema and raw successful 500 ms retransmit remain visible'
+    $mixedSeries = @($mixedHistory.series)
+    Assert-Check ($mixedSeries.Count -eq 1 -and $mixedSeries[0].latencyMs -eq 20 -and
+        $mixedSeries[0].sent -eq 4 -and $mixedSeries[0].lossPercent -eq 25 -and
+        $mixedSeries[0].retransmitPercent -eq 25 -and $mixedSeries[0].maxLatencyMs -eq 500) `
+        'TCP chart bucket average excludes retransmits while preserving loss, retransmits and extrema'
+
+    $suspectHistory = Get-History $averageTargets.suspectOnly.id
+    Assert-Check ($null -eq $suspectHistory.stats.avgLatencyMs -and $suspectHistory.stats.avgLatencySampleCount -eq 0 -and
+        $suspectHistory.stats.sent -eq 1 -and $suspectHistory.stats.received -eq 1 -and
+        $suspectHistory.stats.lossPercent -eq 0 -and $suspectHistory.stats.retransmitPercent -eq 100) `
+        'TCP history containing only a successful retransmit has no average and no packet loss'
+    $suspectSeries = @($suspectHistory.series)
+    Assert-Check ($suspectSeries.Count -eq 1 -and $null -eq $suspectSeries[0].latencyMs -and
+        $suspectSeries[0].minLatencyMs -eq 500 -and $suspectSeries[0].maxLatencyMs -eq 500 -and
+        $suspectHistory.recent[0].success -and $suspectHistory.recent[0].suspectedRetransmit -and
+        $suspectHistory.recent[0].latencyMs -eq 500) `
+        'Retransmit-only chart bucket has a null average while raw latency and extrema remain'
+
+    $icmpAverageHistory = Get-History $averageTargets.icmp.id
+    Assert-Check ($icmpAverageHistory.stats.avgLatencyMs -eq 100 -and $icmpAverageHistory.stats.avgLatencySampleCount -eq 2 -and
+        $icmpAverageHistory.stats.received -eq 2 -and $icmpAverageHistory.stats.retransmitPercent -eq 0 -and
+        @($icmpAverageHistory.series).Count -eq 1 -and $icmpAverageHistory.series[0].latencyMs -eq 100) `
+        'ICMP history and chart bucket retain every successful sample in the average'
+
+    $averageDashboard = (Invoke-Api "/api/dashboard?nodeId=$averageNodeId").Body
+    Assert-Check ($averageDashboard.summary.avgLatencyMs -eq 60 -and $averageDashboard.summary.sent -eq 7 -and
+        [Math]::Abs($averageDashboard.summary.lossPercent - 100.0 / 7) -lt 0.000001) `
+        'Dashboard average weights TCP and ICMP targets by eligible sample count rather than received count'
+    $mixedCard = @($averageDashboard.targets | Where-Object id -eq $averageTargets.mixed.id)[0]
+    Assert-Check ($mixedCard.stats.avgLatencyMs -eq 20 -and $mixedCard.stats.avgLatencySampleCount -eq 2 -and
+        $mixedCard.series[0].latencyMs -eq 20) `
+        'Dashboard target card exposes the same eligible count and average as history'
+    $otherNodeHistory = (Invoke-Api "/api/targets/$($averageTargets.mixed.id)/history?nodeId=$emptyAverageNodeId").Body
+    Assert-Check ($null -eq $otherNodeHistory.stats.avgLatencyMs -and $otherNodeHistory.stats.avgLatencySampleCount -eq 0 -and
+        $otherNodeHistory.stats.sent -eq 0 -and @($otherNodeHistory.series).Count -eq 0) `
+        'History filtered to another node excludes the fixture samples and returns no average'
+    foreach ($emptyNodeFilter in @($emptyAverageNodeId, 'integration-average-unknown')) {
+        $emptyDashboard = (Invoke-Api "/api/dashboard?nodeId=$emptyNodeFilter").Body
+        Assert-Check ($null -eq $emptyDashboard.summary.avgLatencyMs -and $emptyDashboard.summary.sent -eq 0 -and
+            $emptyDashboard.summary.lossPercent -eq 0) `
+            "Dashboard node filter $emptyNodeFilter has no average when no eligible samples exist"
+    }
+    foreach ($key in @('mixed', 'icmp')) {
+        Assert-Check ((Invoke-Api "/api/targets/$($averageTargets[$key].id)" 'DELETE').StatusCode -eq 200) `
+            "Average fixture $key is removed"
+    }
+    $onlySuspectDashboard = (Invoke-Api "/api/dashboard?nodeId=$averageNodeId").Body
+    $onlySuspectCard = @($onlySuspectDashboard.targets | Where-Object id -eq $averageTargets.suspectOnly.id)[0]
+    Assert-Check ($null -eq $onlySuspectDashboard.summary.avgLatencyMs -and $onlySuspectDashboard.summary.sent -eq 1 -and
+        $onlySuspectDashboard.summary.lossPercent -eq 0 -and $onlySuspectCard.stats.received -eq 1 -and
+        $onlySuspectCard.stats.retransmitPercent -eq 100 -and $onlySuspectCard.stats.avgLatencySampleCount -eq 0) `
+        'Dashboard containing only successful retransmits shows no average without treating them as loss'
+    Assert-Check ((Invoke-Api "/api/targets/$($averageTargets.suspectOnly.id)" 'DELETE').StatusCode -eq 200) `
+        'Retransmit-only average fixture is removed'
+    foreach ($fixtureNodeId in @($averageNodeId, $emptyAverageNodeId)) {
+        Assert-Check ((Invoke-Api "/api/nodes/$fixtureNodeId" 'DELETE').StatusCode -eq 200) `
+            "Average fixture Agent $fixtureNodeId is removed"
+    }
+
     $tcp.enabled = $false
     Assert-Check ((Invoke-Api "/api/targets/$($tcp.id)" 'PUT' $tcp).StatusCode -eq 200) 'Project can be paused by update'
     # One configuration/report cycle plus margin lets agents flush in-flight samples.

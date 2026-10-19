@@ -71,6 +71,7 @@ try
     await ProbeTests.RunAsync();
     await TraceRunnerTests.RunAsync();
     TraceCoordinatorTests.Run();
+    TcpAverageTests.Run();
     Console.WriteLine($"All {passed} storage/validation checks, probe checks and traceroute checks passed.");
 }
 finally

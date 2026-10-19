@@ -158,7 +158,8 @@ app.MapGet("/api/dashboard", (double? hours, string? nodeId) =>
     var histories = store.GetTargets().Select(t => (target: t, history: store.GetHistory(t, window, nodeId, false))).ToArray();
     var sent = histories.Sum(h => h.history.Stats.Sent);
     var received = histories.Sum(h => h.history.Stats.Received);
-    var sumLatency = histories.Sum(h => (h.history.Stats.AvgLatencyMs ?? 0) * h.history.Stats.Received);
+    var averageSampleCount = histories.Sum(h => h.history.Stats.AvgLatencySampleCount);
+    var sumLatency = histories.Sum(h => (h.history.Stats.AvgLatencyMs ?? 0) * h.history.Stats.AvgLatencySampleCount);
     return Results.Ok(new
     {
         nodes = nodes.Select(NodeView),
@@ -172,7 +173,8 @@ app.MapGet("/api/dashboard", (double? hours, string? nodeId) =>
         {
             targets = histories.Length, nodes = nodes.Count, onlineNodes = nodes.Count(IsOnline), sent,
             lossPercent = sent > 0 ? 100.0 * (sent - received) / sent : 0,
-            avgLatencyMs = received > 0 ? (double?)(sumLatency / received) : null
+            avgLatencyMs = averageSampleCount > 0 ? (double?)(sumLatency / averageSampleCount) : null,
+            avgLatencySampleCount = averageSampleCount
         },
         settings = PublicSettings(), serverTime = DateTimeOffset.UtcNow
     });

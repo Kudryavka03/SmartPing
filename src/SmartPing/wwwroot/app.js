@@ -89,7 +89,7 @@ function renderSummary(){
   const targets=state.data?.targets || [];
   const cards=[
     {name:'探测项目',value:int(summary.targets),unit:'个',icon:'target',detail:`<span class="good">${targets.filter(target=>target.enabled).length} 个运行中</span><span>· ${targets.filter(target=>!target.enabled).length} 个已暂停</span>`},
-    {name:'平均延迟',value:num(summary.avgLatencyMs),unit:'ms',icon:'clock',detail:`所选时段成功探测的平均耗时`},
+    {name:'平均延迟',value:num(summary.avgLatencyMs),unit:'ms',icon:'clock',detail:`成功探测均值，排除 TCP 疑似重传`},
     {name:'整体丢包率',value:num(summary.lossPercent),unit:'%',icon:'loss',detail:`已完成 ${int(summary.sent)} 次探测`},
     {name:'在线节点',value:int(summary.onlineNodes),unit:`/ ${int(summary.nodes)}`,icon:'nodes',detail:`<span class="good">${summary.onlineNodes?'节点持续上报中':'等待节点连接'}</span>`}
   ];

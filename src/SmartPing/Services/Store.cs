@@ -7,7 +7,7 @@ namespace SmartPing.Services;
 
 public sealed record ProbeStats(long Sent, long Received, double LossPercent, double? AvgLatencyMs,
     double? MinLatencyMs, double? MaxLatencyMs, double? JitterMs, double RetransmitPercent,
-    double? LastLatencyMs, DateTimeOffset? LastSeen, string Status, int MissingSources);
+    double? LastLatencyMs, DateTimeOffset? LastSeen, string Status, int MissingSources, long AvgLatencySampleCount);
 public sealed record SeriesPoint(DateTimeOffset Timestamp, double? LatencyMs, double? MinLatencyMs,
     double? MaxLatencyMs, double LossPercent, double RetransmitPercent, long Sent);
 public sealed record ProbeHistory(ProbeStats Stats, IReadOnlyList<SeriesPoint> Series, IReadOnlyList<ProbeSample> Recent);
@@ -228,11 +228,14 @@ public sealed class Store
         command.Parameters.AddWithValue("$since", since);
         command.Parameters.AddWithValue("$now", now.ToUnixTimeMilliseconds());
         command.Parameters.AddWithValue("$node", nodeId ?? "");
+        command.Parameters.AddWithValue("$isTcp", string.Equals(target.Protocol, "tcp", StringComparison.OrdinalIgnoreCase));
+        const string averageLatency = "CASE WHEN success=1 AND ($isTcp=0 OR retransmit=0) THEN latency END";
         command.CommandText = $"""
-            SELECT COUNT(*),COALESCE(SUM(success),0),AVG(latency),MIN(latency),MAX(latency),COALESCE(SUM(retransmit),0)
+            SELECT COUNT(*),COALESCE(SUM(success),0),AVG({averageLatency}),MIN(latency),MAX(latency),
+                COALESCE(SUM(retransmit),0),COUNT({averageLatency})
             FROM samples WHERE {filter};
             """;
-        long sent, received, retransmit;
+        long sent, received, retransmit, averageSampleCount;
         double? avg, min, max;
         using (var reader = command.ExecuteReader())
         {
@@ -240,6 +243,7 @@ public sealed class Store
             sent = reader.GetInt64(0); received = reader.GetInt64(1);
             avg = NullableDouble(reader, 2); min = NullableDouble(reader, 3); max = NullableDouble(reader, 4);
             retransmit = reader.GetInt64(5);
+            averageSampleCount = reader.GetInt64(6);
         }
         command.CommandText = $"""
             SELECT AVG(ABS(latency-previous)) FROM
@@ -279,13 +283,13 @@ public sealed class Store
         var status = !target.Enabled ? "paused" : lastSeen == null ? "waiting" :
             healthySources == 0 ? "offline" : missingSources > 0 || healthySources < expectedSources.Length || loss > 0 || retransmit > 0 ? "degraded" : "healthy";
         var stats = new ProbeStats(sent, received, loss, avg, min, max, jitter,
-            sent > 0 ? 100.0 * retransmit / sent : 0, lastLatency, lastSeen, status, missingSources);
+            sent > 0 ? 100.0 * retransmit / sent : 0, lastLatency, lastSeen, status, missingSources, averageSampleCount);
 
         // Bound every response to about 240 buckets; preserve loss, extrema and average within each bucket.
         var bucketMs = Math.Max(1000L, (long)(hours * 3600000 / 240));
         command.Parameters.AddWithValue("$bucket", bucketMs);
         command.CommandText = $"""
-            SELECT (timestamp/$bucket)*$bucket,AVG(latency),MIN(latency),MAX(latency),COUNT(*),SUM(success),SUM(retransmit)
+            SELECT (timestamp/$bucket)*$bucket,AVG({averageLatency}),MIN(latency),MAX(latency),COUNT(*),SUM(success),SUM(retransmit)
             FROM samples WHERE {filter} GROUP BY timestamp/$bucket ORDER BY timestamp/$bucket;
             """;
         var series = new List<SeriesPoint>();
