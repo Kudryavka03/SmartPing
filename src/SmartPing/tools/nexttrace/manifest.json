@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "runtime": "win-x64",
+  "components": [
+    {
+      "name": "NextTrace",
+      "version": "1.7.4",
+      "tag": "v1.7.4",
+      "commit": "8884923d9b022d8a25b7fbf69e4ae64fa65eb1c7",
+      "projectUrl": "https://github.com/nxtrace/NTrace-core",
+      "releaseUrl": "https://github.com/nxtrace/NTrace-core/releases/tag/v1.7.4",
+      "sourceUrl": "https://github.com/nxtrace/NTrace-core/archive/8884923d9b022d8a25b7fbf69e4ae64fa65eb1c7.tar.gz",
+      "assetUrl": "https://github.com/nxtrace/NTrace-core/releases/download/v1.7.4/nexttrace_windows_amd64.exe",
+      "assetSha256": "2b64b03167304be22f6f7853516512dd7c848a341f694071e0a7bbca7054bfb3",
+      "license": "GPL-3.0",
+      "licenseFile": "LICENSE.NextTrace.txt"
+    },
+    {
+      "name": "WinDivert",
+      "version": "2.2.2-A",
+      "tag": "v2.2.2",
+      "commit": "1789526ecfb9ff5397c94f9f54c1a3dc2fb60440",
+      "projectUrl": "https://github.com/basil00/WinDivert",
+      "releaseUrl": "https://github.com/basil00/WinDivert/releases/tag/v2.2.2",
+      "sourceUrl": "https://github.com/basil00/WinDivert/archive/1789526ecfb9ff5397c94f9f54c1a3dc2fb60440.tar.gz",
+      "assetUrl": "https://github.com/basil00/WinDivert/releases/download/v2.2.2/WinDivert-2.2.2-A.zip",
+      "assetSha256": "63cb41763bb4b20f600b6de04e991a9c2be73279e317d4d82f237b150c5f3f15",
+      "license": "LGPL-3.0 OR GPL-2.0",
+      "distributionLicense": "LGPL-3.0",
+      "licenseFile": "LICENSE.WinDivert.txt"
+    }
+  ],
+  "files": [
+    {
+      "path": "win-x64/ntrace.exe",
+      "component": "NextTrace",
+      "size": 33031480,
+      "sha256": "2b64b03167304be22f6f7853516512dd7c848a341f694071e0a7bbca7054bfb3",
+      "sourceUrl": "https://github.com/nxtrace/NTrace-core/releases/download/v1.7.4/nexttrace_windows_amd64.exe"
+    },
+    {
+      "path": "win-x64/WinDivert.dll",
+      "component": "WinDivert",
+      "size": 47616,
+      "sha256": "c1e060ee19444a259b2162f8af0f3fe8c4428a1c6f694dce20de194ac8d7d9a2",
+      "sourceUrl": "https://raw.githubusercontent.com/nxtrace/NTrace-core/8884923d9b022d8a25b7fbf69e4ae64fa65eb1c7/assets/windivert/x64/WinDivert.dll"
+    },
+    {
+      "path": "win-x64/WinDivert64.sys",
+      "component": "WinDivert",
+      "size": 94144,
+      "sha256": "8da085332782708d8767bcace5327a6ec7283c17cfb85e40b03cd2323a90ddc2",
+      "sourceUrl": "https://raw.githubusercontent.com/nxtrace/NTrace-core/8884923d9b022d8a25b7fbf69e4ae64fa65eb1c7/assets/windivert/x64/WinDivert64.sys"
+    }
+  ]
+}

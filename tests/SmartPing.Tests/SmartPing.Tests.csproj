@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/SmartPing/SmartPing.csproj" />
+    <ProjectReference Include="../SmartPing.TraceFixture/SmartPing.TraceFixture.csproj" ReferenceOutputAssembly="false" AdditionalProperties="UseAppHost=true" />
+  </ItemGroup>
+</Project>
