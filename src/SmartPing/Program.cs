@@ -150,12 +150,17 @@ app.MapGet("/api/traces/{id}", (string id, TraceCoordinator traces) => traces.Ge
     Results.Ok(job) : Results.NotFound(new { error = "路由追踪任务不存在或已过期。" }));
 app.MapDelete("/api/traces/{id}", (string id, TraceCoordinator traces) => traces.Cancel(id) is { } job ?
     Results.Ok(job) : Results.NotFound(new { error = "路由追踪任务不存在或已过期。" }));
-app.MapGet("/api/dashboard", (double? hours, string? nodeId) =>
+app.MapGet("/api/dashboard", (double? hours, int? minutes, int? bucketSeconds, string? nodeId, string? seriesTargetId) =>
 {
-    var window = Math.Clamp(hours ?? 1, .25, 168);
-    if (!double.IsFinite(window)) return Results.BadRequest(new { error = "时间范围无效。" });
+    if (!HistoryQuery.TryCreate(hours, minutes, bucketSeconds, out var query, out var error))
+        return Results.BadRequest(new { error });
     var nodes = store.GetNodes();
-    var histories = store.GetTargets().Select(t => (target: t, history: store.GetHistory(t, window, nodeId, false))).ToArray();
+    var targets = store.GetTargets();
+    var chartTargetId = targets.FirstOrDefault(t => t.Id == seriesTargetId)?.Id ?? targets.FirstOrDefault()?.Id;
+    var histories = targets.Select(t => (target: t, history: store.GetHistory(t, query.Hours, nodeId, false,
+        query.RequestedBucketSeconds, t.Id == chartTargetId ? HistoryQuery.MaximumChartPoints : 240))).ToArray();
+    var chartBucketSeconds = histories.FirstOrDefault(h => h.target.Id == chartTargetId).history?.BucketSeconds ??
+        HistoryQuery.ResolveBucketSeconds(query.Hours, query.RequestedBucketSeconds);
     var sent = histories.Sum(h => h.history.Stats.Sent);
     var received = histories.Sum(h => h.history.Stats.Received);
     var averageSampleCount = histories.Sum(h => h.history.Stats.AvgLatencySampleCount);
@@ -167,7 +172,7 @@ app.MapGet("/api/dashboard", (double? hours, string? nodeId) =>
         {
             h.target.Id, h.target.Name, h.target.Host, h.target.Protocol, h.target.Port,
             h.target.PacketSize, h.target.IntervalSeconds, h.target.TimeoutMs, h.target.RetransmitThresholdMs,
-            h.target.Enabled, h.target.NodeIds, h.target.Group, h.history.Stats, h.history.Series
+            h.target.Enabled, h.target.NodeIds, h.target.Group, h.history.Stats, h.history.Series, h.history.BucketSeconds
         }),
         summary = new
         {
@@ -176,16 +181,18 @@ app.MapGet("/api/dashboard", (double? hours, string? nodeId) =>
             avgLatencyMs = averageSampleCount > 0 ? (double?)(sumLatency / averageSampleCount) : null,
             avgLatencySampleCount = averageSampleCount
         },
-        settings = PublicSettings(), serverTime = DateTimeOffset.UtcNow
+        settings = PublicSettings(), serverTime = DateTimeOffset.UtcNow,
+        windowMinutes = query.Minutes, requestedBucketSeconds = query.RequestedBucketSeconds,
+        bucketSeconds = chartBucketSeconds, seriesTargetId = chartTargetId
     });
 });
-app.MapGet("/api/targets/{id}/history", (string id, double? hours, string? nodeId) =>
+app.MapGet("/api/targets/{id}/history", (string id, double? hours, int? minutes, int? bucketSeconds, string? nodeId) =>
 {
     var target = store.GetTarget(id);
     if (target is null) return Results.NotFound(new { error = "探测项目不存在。" });
-    var window = Math.Clamp(hours ?? 1, .25, 168);
-    if (!double.IsFinite(window)) return Results.BadRequest(new { error = "时间范围无效。" });
-    return Results.Ok(store.GetHistory(target, window, nodeId));
+    if (!HistoryQuery.TryCreate(hours, minutes, bucketSeconds, out var query, out var error))
+        return Results.BadRequest(new { error });
+    return Results.Ok(store.GetHistory(target, query.Hours, nodeId, bucketSeconds: query.RequestedBucketSeconds));
 });
 app.MapPost("/api/targets", (TargetConfig target) =>
 {

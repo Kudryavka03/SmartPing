@@ -1,0 +1,115 @@
+:root {
+  --sidebar-width: 224px;
+  --sidebar-space: var(--sidebar-width);
+  --sidebar-mobile-space: 57px;
+}
+
+:root[data-sidebar-collapsed="true"] {
+  --sidebar-space: 0px;
+  --sidebar-mobile-space: 0px;
+}
+
+.sidebar {
+  transform: translateX(0);
+  transition: transform .22s ease;
+}
+
+:root[data-sidebar-collapsed="true"] .sidebar {
+  transform: translateX(-100%);
+  pointer-events: none;
+}
+
+.app-shell {
+  margin-left: var(--sidebar-space);
+  transition: margin-left .22s ease, margin-bottom .22s ease;
+}
+
+.toast-region {
+  left: calc((100% + var(--sidebar-space)) / 2);
+  transition: left .22s ease, bottom .22s ease;
+}
+
+.sidebar .brand {
+  padding-bottom: 23px;
+}
+
+.sidebar-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  flex-shrink: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 7px;
+  min-width: 32px;
+  min-height: 32px;
+  background: transparent;
+  color: #8997a6;
+  line-height: 1.5;
+}
+
+.sidebar-toggle svg {
+  width: 18px;
+  height: 18px;
+  flex: none;
+}
+
+.sidebar-toggle:hover {
+  background: #edf3f6;
+  color: var(--teal);
+}
+
+.sidebar-collapse {
+  justify-content: flex-start;
+  width: calc(100% - 26px);
+  margin: 0 13px 17px;
+  padding: 7px 12px;
+  color: #a7b5c3;
+  border-color: #ffffff0c;
+  font-size: 11px;
+}
+
+.sidebar-collapse:hover {
+  color: #8ad8cf;
+  background: #203949;
+}
+
+.sidebar-reopen {
+  border-color: var(--border);
+  background: #f8fafb;
+}
+
+.sidebar-reopen[hidden] {
+  display: none;
+}
+
+.topbar-leading {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  min-width: 0;
+}
+
+@media (max-width: 1180px) {
+  :root { --sidebar-width: 190px; }
+}
+
+@media (max-width: 930px) {
+  :root { --sidebar-width: 70px; }
+  .sidebar-collapse { padding: 7px; justify-content: center; }
+  .sidebar-toggle-label { display: none; }
+}
+
+@media (max-width: 680px) {
+  :root { --sidebar-width: 0px; }
+  .sidebar-collapse { display: none; }
+  .app-shell { margin-bottom: var(--sidebar-mobile-space); }
+  .topbar-leading { gap: 9px; }
+  .sidebar-reopen { min-width: 30px; min-height: 30px; padding: 5px; }
+  .toast-region { bottom: calc(var(--sidebar-mobile-space) + 16px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar, .app-shell, .toast-region { transition: none; }
+}

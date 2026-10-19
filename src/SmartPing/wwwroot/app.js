@@ -21,11 +21,115 @@ const paths = {
   history:'<path d="M3 3v6h6M3 9a9 9 0 1 1 0 6M12 7v5l3 2"/>',check:'<path d="m5 12 4 4L19 6"/>'
 };
 const icon = name => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.target}</svg>`;
-const state = {data:null,settings:null,hours:1,selected:'',view:'overview',search:'',group:'',node:'',protocol:'',loading:false,refreshPending:false,token:sessionStorage.getItem('smartping.adminToken') || '',history:null,historyTarget:'',lastSuccess:null};
+function validPositiveInteger(value,max){return typeof value==='string'&&/^[0-9]+$/.test(value)&&Number.isSafeInteger(Number(value))&&Number(value)>=1&&Number(value)<=max;}
+function validLatencyAxisMaximum(value){return typeof value==='string'&&/^[0-9]+(?:\.[0-9]{1,3})?$/.test(value)&&Number.isFinite(Number(value))&&Number(value)>=0.1&&Number(value)<=60000;}
+function latencyLabel(value){return Number.isFinite(value)?value.toLocaleString('zh-CN',{maximumFractionDigits:3}):'—';}
+function readStatisticsPreference(){
+  const defaults={window:{kind:'hours',value:1},bucketSeconds:15,latencyAxis:{mode:'auto',maximumMs:1000}};
+  try{
+    const saved=JSON.parse(localStorage.getItem('smartping.statistics') || 'null');
+    if(!saved || typeof saved!=='object')return defaults;
+    const window=saved.window;
+    if(window?.kind==='minutes'&&Number.isInteger(window.value)&&window.value>=1&&window.value<=60)defaults.window={kind:'minutes',value:window.value};
+    else if(window?.kind==='hours'&&[1,6,24,168].includes(window.value))defaults.window={kind:'hours',value:window.value};
+    if(Number.isInteger(saved.bucketSeconds)&&saved.bucketSeconds>=1&&saved.bucketSeconds<=3600)defaults.bucketSeconds=saved.bucketSeconds;
+    if(saved.latencyAxis&&['auto','manual'].includes(saved.latencyAxis.mode)&&typeof saved.latencyAxis.maximumMs==='number'&&validLatencyAxisMaximum(String(saved.latencyAxis.maximumMs)))defaults.latencyAxis={mode:saved.latencyAxis.mode,maximumMs:saved.latencyAxis.maximumMs};
+  }catch{}
+  return defaults;
+}
+const statisticsPreference=readStatisticsPreference();
+function readStatisticsCollapsed(){try{return localStorage.getItem('smartping.statistics.collapsed')==='true';}catch{return false;}}
+const state = {data:null,dataScope:'',dataSeriesTarget:'',requestEpoch:0,historyRequestSeq:0,settings:null,window:statisticsPreference.window,bucketSeconds:statisticsPreference.bucketSeconds,latencyAxis:statisticsPreference.latencyAxis,statisticsCollapsed:readStatisticsCollapsed(),selected:'',view:'overview',search:'',group:'',node:'',protocol:'',loading:false,refreshPending:false,token:sessionStorage.getItem('smartping.adminToken') || '',history:null,historyTarget:'',lastSuccess:null};
 const traceState = {job:null,submitting:false,cancelling:false,polling:false,timer:null,tool:null,toolLoading:false};
 const labels = {overview:'监测概览',targets:'探测项目',nodes:'探测节点',trace:'路由追踪',settings:'设置与部署'};
 let refreshTimer;
+let chartWheelTimer=null,pendingWheelDirection=0;
+const wheelWindowMinutes=[1,3,5,10,30,60,360,1440,10080];
 
+function windowMinutes(){return state.window.value*(state.window.kind==='hours'?60:1);}
+function windowLabel(){return state.window.kind==='minutes'?`${state.window.value} 分钟`:state.window.value===168?'7 天':`${state.window.value} 小时`;}
+function statisticsQuery(){return `${state.window.kind}=${state.window.value}&bucketSeconds=${state.bucketSeconds}${state.node?`&nodeId=${encodeURIComponent(state.node)}`:''}`;}
+function dashboardQuery(){return `${statisticsQuery()}${state.selected?`&seriesTargetId=${encodeURIComponent(state.selected)}`:''}`;}
+function dashboardRequestKey(){return `${state.requestEpoch}|${dashboardQuery()}`;}
+function setNodeFilter(id){if(state.node!==id){state.node=id;state.history=null;state.requestEpoch++;state.historyRequestSeq++;}}
+function saveStatisticsPreference(){try{localStorage.setItem('smartping.statistics',JSON.stringify({window:state.window,bucketSeconds:state.bucketSeconds,latencyAxis:state.latencyAxis}));}catch{}}
+function statisticsError(inputId,errorId,message=''){
+  const input=$(inputId);input.setAttribute('aria-invalid',message?'true':'false');formError(errorId,message);
+}
+function renderStatisticsDisclosure(){
+  const button=$('#statistics-toggle'),fields=$('#statistics-fields');
+  if(state.statisticsCollapsed&&fields.contains(document.activeElement))button.focus();
+  fields.hidden=state.statisticsCollapsed;button.setAttribute('aria-expanded',String(!state.statisticsCollapsed));
+  $('#statistics-toggle-label').textContent=state.statisticsCollapsed?'展开':'收起';
+}
+function toggleStatisticsSettings(){
+  state.statisticsCollapsed=!state.statisticsCollapsed;
+  try{localStorage.setItem('smartping.statistics.collapsed',String(state.statisticsCollapsed));}catch{}
+  renderStatisticsDisclosure();
+}
+function renderStatisticsSummary(){
+  $('#statistics-period').textContent=`统计周期：最近 ${windowLabel()}`;
+  const target=state.dataScope===statisticsQuery()&&state.dataSeriesTarget===state.selected?state.data?.targets.find(item=>item.id===state.selected):null;
+  const actual=target?effectiveBucketSeconds(target):state.bucketSeconds;
+  $('#statistics-interval-summary').textContent=`瞬时统计间隔：${int(state.bucketSeconds)} 秒${actual!==state.bucketSeconds?` · 实际 ${int(actual)} 秒（长周期自动汇总）`:''}`;
+  $('#statistics-axis-summary').textContent=`纵轴上限：${state.latencyAxis.mode==='manual'?`${latencyLabel(state.latencyAxis.maximumMs)} ms`:'自动'}`;
+}
+function renderStatisticsControls(){
+  $$('.range-selector button').forEach(button=>{
+    const active=windowMinutes()===(button.dataset.minutes?Number(button.dataset.minutes):Number(button.dataset.hours)*60);
+    button.classList.toggle('active',active);button.setAttribute('aria-pressed',String(active));
+  });
+  renderStatisticsSummary();renderStatisticsDisclosure();
+}
+function updateStatistics({window=state.window,bucketSeconds=state.bucketSeconds}={}){
+  cancelChartWheel();
+  state.window=window;state.bucketSeconds=bucketSeconds;state.history=null;state.requestEpoch++;state.historyRequestSeq++;saveStatisticsPreference();renderStatisticsControls();renderChart();
+  if(state.historyTarget){$('#recent-heading').textContent=`${state.data?.targets.find(item=>item.id===state.historyTarget)?.name || '项目'} · 最近 ${windowLabel()} 的探测记录`;$('#recent-content').innerHTML='<div class="empty-state"><div class="loading-spinner" aria-label="正在加载所选周期"></div></div>';}
+  refresh();
+}
+function bindStatisticsInput(inputId,errorId,message){
+  const input=$(inputId);
+  function reject(event,inserted){if(typeof inserted==='string'&&/[^0-9]/.test(inserted)){event.preventDefault();statisticsError(inputId,errorId,message);}}
+  input.addEventListener('beforeinput',event=>reject(event,event.data??event.dataTransfer?.getData('text/plain')));
+  input.addEventListener('paste',event=>reject(event,event.clipboardData?.getData('text')));
+  input.addEventListener('drop',event=>reject(event,event.dataTransfer?.getData('text/plain')));
+  input.addEventListener('input',()=>statisticsError(inputId,errorId));
+}
+function latencyAxisFields(){const manual=$('#latency-axis-mode').value==='manual';$('#latency-axis-max').disabled=!manual;statisticsError('#latency-axis-max','#latency-axis-error');}
+function applyLatencyAxis(event){
+  event.preventDefault();const mode=$('#latency-axis-mode').value,raw=$('#latency-axis-max').value;
+  if(!['auto','manual'].includes(mode))return statisticsError('#latency-axis-max','#latency-axis-error','请选择自动适应或手动上限。');
+  if(mode==='manual'&&!validLatencyAxisMaximum(raw))return statisticsError('#latency-axis-max','#latency-axis-error','请输入 0.1–60,000 ms，最多 3 位小数；禁止空格、正负号、科学计数法和特殊字符。');
+  state.latencyAxis={mode,maximumMs:mode==='manual'?Number(raw):state.latencyAxis.maximumMs};
+  statisticsError('#latency-axis-max','#latency-axis-error');saveStatisticsPreference();renderChart();
+}
+function latencyAxisScale(series){
+  const maxLatency=Math.max(0,...series.flatMap(point=>[point.latencyMs,point.minLatencyMs,point.maxLatencyMs]).filter(value=>Number.isFinite(value)&&value>=0));
+  if(state.latencyAxis.mode==='manual')return {scale:state.latencyAxis.maximumMs,overLimitCount:series.filter(point=>[point.latencyMs,point.minLatencyMs,point.maxLatencyMs].some(value=>Number.isFinite(value)&&value>state.latencyAxis.maximumMs)).length};
+  const rough=Math.max(0.1,maxLatency)*1.18,step=10**Math.floor(Math.log10(rough))/5;
+  return {scale:Number((Math.ceil(rough/step)*step).toPrecision(12)),overLimitCount:0};
+}
+function nextWheelWindowMinutes(current,direction){
+  if(direction<0)return [...wheelWindowMinutes].reverse().find(value=>value<current)??wheelWindowMinutes[0];
+  if(direction>0)return wheelWindowMinutes.find(value=>value>current)??wheelWindowMinutes[wheelWindowMinutes.length-1];
+  return current;
+}
+function cancelChartWheel(){if(chartWheelTimer!==null)clearTimeout(chartWheelTimer);chartWheelTimer=null;pendingWheelDirection=0;}
+function queueChartWheel(direction){
+  if(!Number.isFinite(direction)||direction===0)return;
+  pendingWheelDirection+=direction;if(chartWheelTimer!==null)clearTimeout(chartWheelTimer);
+  chartWheelTimer=setTimeout(()=>{
+    const next=nextWheelWindowMinutes(windowMinutes(),pendingWheelDirection);chartWheelTimer=null;pendingWheelDirection=0;
+    if(next===windowMinutes())return;
+    if(next<=60)$('#custom-range-minutes').value=next;
+    statisticsError('#custom-range-minutes','#custom-range-error');updateStatistics({window:{kind:next<=60?'minutes':'hours',value:next<=60?next:next/60}});
+  },180);
+}
+function handleChartWheel(event){
+  if(event.ctrlKey||event.shiftKey||event.altKey||event.metaKey||!Number.isFinite(event.deltaY)||event.deltaY===0||Math.abs(event.deltaX||0)>Math.abs(event.deltaY))return;
+  if(nextWheelWindowMinutes(windowMinutes(),event.deltaY)===windowMinutes()){if(chartWheelTimer!==null)queueChartWheel(event.deltaY);return;}
+  event.preventDefault();queueChartWheel(event.deltaY);
+}
 function fillIcons(root=document){ $$('[data-icon]',root).forEach(element=>element.innerHTML=icon(element.dataset.icon)); }
 function toast(message,error=false){ const item=document.createElement('div');item.className=`toast${error?' error':''}`;item.textContent=message;$('#toast-region').append(item);setTimeout(()=>item.remove(),4500); }
 function formError(id,message){const element=$(id);element.textContent=message || '';element.hidden=!message;}
@@ -59,12 +163,16 @@ async function api(path,options={}){
   return result;
 }
 async function refresh({silent=false}={}){
-  if(state.loading){if(!silent)state.refreshPending=true;return;}
+  if(state.loading){if(!silent || state.activeRequestKey!==dashboardRequestKey())state.refreshPending=true;return;}
+  const requestKey=dashboardRequestKey(),requestScope=statisticsQuery(),requestQuery=dashboardQuery();state.activeRequestKey=requestKey;
   state.loading=true;$('#refresh-button').classList.add('spinning');
+  if(state.data&&state.dataScope!==requestScope)renderChart();
   try{
-    const data=await api(`/api/dashboard?hours=${state.hours}${state.node?`&nodeId=${encodeURIComponent(state.node)}`:''}`);
-    state.data=data;state.lastSuccess=new Date();
+    const data=await api(`/api/dashboard?${requestQuery}`);
+    if(requestKey!==dashboardRequestKey()){state.refreshPending=true;return;}
+    state.data=data;state.dataScope=requestScope;state.lastSuccess=new Date();
     if(!data.targets.some(target=>target.id===state.selected))state.selected=data.targets[0]?.id || '';
+    state.dataSeriesTarget=data.seriesTargetId || state.selected;
     $('#connection-error').hidden=true;$('#connection-label').textContent='监测中心已连接';$('#connection-dot').className='status-dot';
     $('#server-name').textContent=data.settings.nodeName || '本地监测中心';
     $('#last-updated').textContent=`更新于 ${date(data.serverTime)}`;
@@ -74,6 +182,7 @@ async function refresh({silent=false}={}){
     if(state.view==='settings' && !state.settings)await loadSettings();
     if(state.historyTarget && state.view==='targets')await loadRecent(state.historyTarget,true);
   }catch(error){
+    if(requestKey!==dashboardRequestKey()){state.refreshPending=true;return;}
     $('#connection-label').textContent='连接已中断';$('#connection-dot').className='status-dot offline';
     $('#connection-error-text').textContent=error.message+(state.lastSuccess?` 当前显示 ${date(state.lastSuccess)} 的数据。`:'');$('#connection-error').hidden=false;
     if(!state.data)renderInitialError();
@@ -108,8 +217,8 @@ function renderFilters(){
     $('.search-input',container).addEventListener('input',event=>{state.search=event.target.value;renderTargets();syncSearch(event.target);});
     $('.group-filter',container).addEventListener('change',event=>{state.group=event.target.value;renderFilters();renderTargets();});
     $('.protocol-filter',container).addEventListener('change',event=>{state.protocol=event.target.value;renderFilters();renderTargets();});
-    $('.node-filter',container).addEventListener('change',event=>{state.node=event.target.value;renderFilters();renderTargets();refresh();});
-    $('.filter-clear',container)?.addEventListener('click',()=>{const hadNode=state.node;state.search=state.group=state.node=state.protocol='';renderFilters();renderTargets();if(hadNode)refresh();});
+    $('.node-filter',container).addEventListener('change',event=>{setNodeFilter(event.target.value);renderFilters();renderTargets();refresh();});
+    $('.filter-clear',container)?.addEventListener('click',()=>{const hadNode=state.node;setNodeFilter('');state.search=state.group=state.protocol='';renderFilters();renderTargets();if(hadNode)refresh();});
   }
 }
 function syncSearch(source){$$('.search-input').filter(input=>input!==source).forEach(input=>input.value=state.search);}
@@ -132,7 +241,7 @@ function renderTargets(){
   for(const container of [$('#overview-targets'),$('#all-targets')]){
     container.innerHTML=html;
     $$('.add-target',container).forEach(button=>button.addEventListener('click',()=>openTarget()));
-    $('.clear-all-filters',container)?.addEventListener('click',()=>{state.search=state.group=state.node=state.protocol='';renderFilters();renderTargets();refresh();});
+    $('.clear-all-filters',container)?.addEventListener('click',()=>{setNodeFilter('');state.search=state.group=state.protocol='';renderFilters();renderTargets();refresh();});
     $$('.target-row',container).forEach(row=>{
       const routeButton=document.createElement('button');routeButton.type='button';routeButton.className='icon-button';routeButton.dataset.action='trace';routeButton.title='路由追踪';routeButton.setAttribute('aria-label','追踪此目标的路由');routeButton.innerHTML=icon('route');$('.row-actions',row).prepend(routeButton);
       row.addEventListener('click',event=>{if(event.target.closest('button'))return;selectTarget(row.dataset.id);});
@@ -141,7 +250,7 @@ function renderTargets(){
     });
   }
 }
-function selectTarget(id){state.selected=id;location.hash='overview';renderChart();renderTargets();$('#chart-target').focus();}
+function selectTarget(id){if(state.selected!==id){state.selected=id;state.requestEpoch++;}location.hash='overview';renderChart();renderTargets();$('#chart-target').focus();refresh();}
 async function targetAction(id,action,button){
   const target=state.data.targets.find(item=>item.id===id);if(!target)return;
   if(action==='edit')return openTarget(target);
@@ -151,29 +260,38 @@ async function targetAction(id,action,button){
   if(action==='toggle'){button.disabled=true;try{await api(`/api/targets/${encodeURIComponent(id)}`,{method:'PUT',body:JSON.stringify({...target,enabled:!target.enabled})});toast(target.enabled?'已暂停探测':'已启用探测');await refresh();}catch(error){toast(error.message,true);}finally{button.disabled=false;}}
 }
 function renderChart(){
+  renderStatisticsSummary();
+  $('#chart-axis-warning').hidden=true;$('#chart-axis-warning').textContent='';
   const select=$('#chart-target'),targets=state.data?.targets || [];
   select.innerHTML=targets.length?targets.map(target=>`<option value="${esc(target.id)}"${target.id===state.selected?' selected':''}>${esc(target.name)}</option>`).join(''):'<option value="">暂无探测项目</option>';
   const target=targets.find(item=>item.id===state.selected),badge=$('#chart-protocol');badge.hidden=!target;
   if(target){badge.textContent=target.protocol==='tcp'?'TCP':'ICMP';badge.className=`protocol-badge ${target.protocol}`;}
+  if(target&&(state.dataScope!==statisticsQuery()||state.dataSeriesTarget!==target.id)){
+    $('#detail-metrics').innerHTML='';$('#chart-bucket-info').textContent='正在加载所选统计…';
+    $('#chart-content').innerHTML='<div class="chart-empty"><div class="empty-state"><div class="loading-spinner" aria-label="正在加载所选项目的统计数据"></div><p>正在加载所选项目与周期的数据…</p></div></div>';return;
+  }
   const stats=target?.stats || {};
   const metrics=[['最小延迟',stats.minLatencyMs,'ms'],['最大延迟',stats.maxLatencyMs,'ms'],['平均抖动',stats.jitterMs,'ms','同一节点连续两次有效探测的延迟差绝对值均值；排除 TCP 疑似重传，且不跨过失败、缺失延迟或 TCP 疑似重传样本配对。'],['成功 / 总探测',`${int(stats.received)} / ${int(stats.sent)}`,''],target?.protocol==='tcp'?['疑似重传率',stats.retransmitPercent,'%']:['最近延迟',stats.lastLatencyMs,'ms']];
   $('#detail-metrics').innerHTML=metrics.map(([label,value,unit,title])=>`<div class="detail-metric"${title?` title="${esc(title)}"`:''}><span>${label}</span><strong>${typeof value==='string'?value:num(value)}<small>${unit}</small></strong></div>`).join('');
   const series=(target?.series || []).filter(point=>point.timestamp).sort((a,b)=>new Date(a.timestamp)-new Date(b.timestamp));
-  if(!series.length){$('#chart-bucket-info').textContent='';$('#chart-content').innerHTML=`<div class="chart-empty"><div class="empty-state"><div class="empty-icon">${icon('chart')}</div><h3>${target?'等待探测数据':'让网络表现有迹可循'}</h3><p>${target?(target.enabled?'首次探测完成后，这里将展示真实的延迟与丢包历史。':'此项目已暂停，可在项目列表中重新启用。'):'创建探测项目后，在这里查看延迟趋势、丢包和链路波动。'}</p></div></div>`;return;}
+  if(!series.length){$('#chart-bucket-info').textContent=target?bucketLabel(target):'';$('#chart-content').innerHTML=`<div class="chart-empty"><div class="empty-state"><div class="empty-icon">${icon('chart')}</div><h3>${target?'所选时段暂无探测数据':'让网络表现有迹可循'}</h3><p>${target?(target.enabled?'等待探测完成，或选择更长的统计周期查看历史记录。':'此项目已暂停，可在项目列表中重新启用。'):'创建探测项目后，在这里查看延迟趋势、丢包和链路波动。'}</p></div></div>`;return;}
   drawChart(series,target);
 }
+function effectiveBucketSeconds(target){const actual=target?.bucketSeconds??state.data?.bucketSeconds;return Number.isInteger(actual)&&actual>0?actual:state.bucketSeconds;}
+function bucketLabel(target){const actual=effectiveBucketSeconds(target);return actual===state.bucketSeconds?`每 ${int(actual)} 秒统计`:`实际每 ${int(actual)} 秒统计（设置 ${int(state.bucketSeconds)} 秒，长周期自动汇总）`;}
 function drawChart(series,target){
   const host=$('#chart-content');
   const compact=host.clientWidth<560;
   const width=Math.max(340,host.clientWidth-(compact?10:38)),left=compact?38:49,right=15,top=25,bottom=compact?175:221,lossTop=compact?206:251,lossBottom=compact?247:299,totalHeight=compact?277:328,plotWidth=width-left-right;
-  const now=new Date(state.data.serverTime).getTime(),start=now-state.hours*3600000,end=now;
+  const now=new Date(state.data.serverTime).getTime(),start=now-windowMinutes()*60000,end=now;
   const x=timestamp=>left+Math.max(0,Math.min(1,(new Date(timestamp).getTime()-start)/(end-start)))*plotWidth;
-  const maxLatency=Math.max(1,...series.map(point=>point.maxLatencyMs ?? point.latencyMs ?? 0));
-  const rough=maxLatency*1.18,power=10**Math.floor(Math.log10(rough)),scale=Math.ceil(rough/power/2)*power*2;
+  const {scale,overLimitCount}=latencyAxisScale(series);
+  $('#chart-axis-warning').hidden=!overLimitCount;
+  $('#chart-axis-warning').textContent=overLimitCount?`超出上限 ${int(overLimitCount)} 个数据点 · 上限 ${latencyLabel(scale)} ms；切换自动适应可查看完整范围。`:'';
   const y=value=>bottom-Math.max(0,value)/scale*(bottom-top);
-  const grid=Array.from({length:5},(_,index)=>{const value=scale*index/4,position=y(value);return `<line x1="${left}" x2="${width-right}" y1="${position}" y2="${position}" stroke="#edf2f5" stroke-dasharray="3 5"/><text x="${left-11}" y="${position+3}" text-anchor="end" class="chart-label">${num(value,value<10?1:0)}</text>`;}).join('');
+  const grid=Array.from({length:5},(_,index)=>{const value=scale*index/4,position=y(value);return `<line x1="${left}" x2="${width-right}" y1="${position}" y2="${position}" stroke="#edf2f5" stroke-dasharray="3 5"/><text x="${left-11}" y="${position+3}" text-anchor="end" class="chart-label">${latencyLabel(value)}</text>`;}).join('');
   let groups=[],current=[];
-  const gapLimit=Math.max(1000,state.hours*3600000/240)*1.5;
+  const gapLimit=Math.max(1000,effectiveBucketSeconds(target)*1000)*1.5;
   for(const point of series){
     if(current.length&&new Date(point.timestamp)-new Date(current[current.length-1].timestamp)>gapLimit){groups.push(current);current=[];}
     if(point.latencyMs==null){if(current.length)groups.push(current);current=[];}else current.push(point);
@@ -187,38 +305,41 @@ function drawChart(series,target){
   const barWidth=Math.max(1,Math.min(14,plotWidth/Math.max(series.length,1)*.75));
   const bars=series.map(point=>{const pointX=x(point.timestamp),loss=Math.max(0,Math.min(100,point.lossPercent || 0)),retrans=Math.max(0,Math.min(100,point.retransmitPercent || 0));return `${loss?`<rect x="${pointX-barWidth/2}" y="${lossBottom-loss/100*(lossBottom-lossTop)}" width="${barWidth}" height="${loss/100*(lossBottom-lossTop)}" rx="1" fill="#df8790"/>`:''}${target.protocol==='tcp'&&retrans?`<rect x="${pointX-barWidth/2}" y="${lossBottom-retrans/100*(lossBottom-lossTop)}" width="${barWidth/2}" height="${retrans/100*(lossBottom-lossTop)}" rx="1" fill="#dda65a"/>`:''}`;}).join('');
   const ticks=compact?2:5;
-  const timeLabels=Array.from({length:ticks+1},(_,index)=>{const time=new Date(start+(end-start)*index/ticks);const label=state.hours>=24?time.toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}):time.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false});return `<text x="${left+plotWidth*index/ticks}" y="${totalHeight-8}" text-anchor="${index===0?'start':index===ticks?'end':'middle'}" class="chart-label">${label}</text>`;}).join('');
-  host.innerHTML=`<svg class="chart-svg" viewBox="0 0 ${width} ${totalHeight}" role="img" aria-label="${esc(target.name)} 最近 ${state.hours} 小时的延迟和丢包趋势"><defs><clipPath id="plot-clip"><rect x="${left-1}" y="${top-2}" width="${plotWidth+2}" height="${lossBottom-top+3}"/></clipPath></defs>${grid}<text x="${left}" y="12" class="chart-unit">延迟 / ms</text><g clip-path="url(#plot-clip)">${lines}${bars}</g><line x1="${left}" x2="${width-right}" y1="${lossBottom}" y2="${lossBottom}" stroke="#edf2f5"/><text x="${left}" y="${lossTop-9}" class="chart-unit">丢包率 / %${target.protocol==='tcp'?' · 橙色为疑似重传率':''}</text><text x="${left-11}" y="${lossTop+5}" text-anchor="end" class="chart-label">100</text><text x="${left-11}" y="${lossBottom+2}" text-anchor="end" class="chart-label">0</text>${timeLabels}<line id="chart-crosshair" x1="0" x2="0" y1="${top}" y2="${lossBottom}" stroke="#a9bfc4" stroke-dasharray="3 4" visibility="hidden"/><circle id="chart-point" r="3.5" fill="#fff" stroke="#2d9f93" stroke-width="2" visibility="hidden"/><rect id="chart-hit-area" x="${left}" y="${top}" width="${plotWidth}" height="${lossBottom-top}" fill="transparent" tabindex="0" aria-label="延迟图表，使用左右方向键查看探测详情"/></svg><div class="chart-tooltip" hidden></div>`;
-  $('#chart-bucket-info').textContent=`${series.length} 个数据点`;
+  const timeLabels=Array.from({length:ticks+1},(_,index)=>{const time=new Date(start+(end-start)*index/ticks);const label=windowMinutes()>=1440?time.toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}):time.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',...(windowMinutes()<=5?{second:'2-digit'}:{}),hour12:false});return `<text x="${left+plotWidth*index/ticks}" y="${totalHeight-8}" text-anchor="${index===0?'start':index===ticks?'end':'middle'}" class="chart-label">${label}</text>`;}).join('');
+  host.innerHTML=`<svg class="chart-svg" viewBox="0 0 ${width} ${totalHeight}" role="img" aria-label="${esc(target.name)} 最近 ${windowLabel()}的延迟和丢包趋势"><defs><clipPath id="plot-clip"><rect x="${left-1}" y="${top-2}" width="${plotWidth+2}" height="${lossBottom-top+3}"/></clipPath></defs>${grid}<text x="${left}" y="12" class="chart-unit">延迟 / ms</text><g clip-path="url(#plot-clip)">${lines}${bars}</g><line x1="${left}" x2="${width-right}" y1="${lossBottom}" y2="${lossBottom}" stroke="#edf2f5"/><text x="${left}" y="${lossTop-9}" class="chart-unit">丢包率 / %${target.protocol==='tcp'?' · 橙色为疑似重传率':''}</text><text x="${left-11}" y="${lossTop+5}" text-anchor="end" class="chart-label">100</text><text x="${left-11}" y="${lossBottom+2}" text-anchor="end" class="chart-label">0</text>${timeLabels}<line id="chart-crosshair" x1="0" x2="0" y1="${top}" y2="${lossBottom}" stroke="#a9bfc4" stroke-dasharray="3 4" visibility="hidden"/><circle id="chart-point" r="3.5" fill="#fff" stroke="#2d9f93" stroke-width="2" visibility="hidden"/><rect id="chart-hit-area" x="${left}" y="${top}" width="${plotWidth}" height="${lossBottom-top}" fill="transparent" tabindex="0" aria-label="延迟图表，使用左右方向键查看探测详情"/></svg><div class="chart-tooltip" hidden></div>`;
+  $('#chart-bucket-info').textContent=`${bucketLabel(target)} · ${series.length} 个数据点`;
   const tooltip=$('.chart-tooltip',host),svg=$('svg',host),cross=$('#chart-crosshair'),pointEl=$('#chart-point'),hit=$('#chart-hit-area');let activeIndex=series.length-1;
   function showPoint(index){
     activeIndex=Math.max(0,Math.min(series.length-1,index));const point=series[activeIndex],pointX=x(point.timestamp),rect=svg.getBoundingClientRect(),hostRect=host.getBoundingClientRect();
     cross.setAttribute('x1',pointX);cross.setAttribute('x2',pointX);cross.setAttribute('visibility','visible');
-    if(point.latencyMs!=null){pointEl.setAttribute('cx',pointX);pointEl.setAttribute('cy',y(point.latencyMs));pointEl.setAttribute('visibility','visible');}else pointEl.setAttribute('visibility','hidden');
-    tooltip.innerHTML=`<strong>${esc(date(point.timestamp,true))}</strong><p><span>平均延迟</span>${num(point.latencyMs)} ms</p><p><span>丢包率</span>${num(point.lossPercent)} %</p>${target.protocol==='tcp'?`<p><span>疑似重传率</span>${num(point.retransmitPercent)} %</p>`:''}<p><span>探测次数</span>${int(point.sent)}</p>`;tooltip.hidden=false;
+    if(point.latencyMs!=null&&point.latencyMs>=0&&point.latencyMs<=scale){pointEl.setAttribute('cx',pointX);pointEl.setAttribute('cy',y(point.latencyMs));pointEl.setAttribute('visibility','visible');}else pointEl.setAttribute('visibility','hidden');
+    tooltip.innerHTML=`<strong>${esc(date(point.timestamp,true))}</strong><p><span>平均延迟</span>${latencyLabel(point.latencyMs)} ms</p><p><span>最小 / 最大</span>${latencyLabel(point.minLatencyMs??point.latencyMs)} / ${latencyLabel(point.maxLatencyMs??point.latencyMs)} ms</p><p><span>丢包率</span>${num(point.lossPercent)} %</p>${target.protocol==='tcp'?`<p><span>疑似重传率</span>${num(point.retransmitPercent)} %</p>`:''}<p><span>探测次数</span>${int(point.sent)}</p>`;tooltip.hidden=false;
     const natural=rect.left-hostRect.left+pointX/width*rect.width,half=tooltip.offsetWidth/2;
     tooltip.style.left=`${Math.max(half+5,Math.min(hostRect.width-half-5,natural))}px`;tooltip.style.top='29px';
   }
   function hidePoint(){tooltip.hidden=true;cross.setAttribute('visibility','hidden');pointEl.setAttribute('visibility','hidden');}
   hit.addEventListener('pointermove',event=>{const rect=svg.getBoundingClientRect(),chartX=(event.clientX-rect.left)/rect.width*width;let nearest=0,distance=Infinity;series.forEach((point,index)=>{const next=Math.abs(x(point.timestamp)-chartX);if(next<distance){distance=next;nearest=index;}});showPoint(nearest);});
   hit.addEventListener('pointerleave',hidePoint);hit.addEventListener('blur',hidePoint);hit.addEventListener('focus',()=>showPoint(activeIndex));
+  hit.addEventListener('wheel',handleChartWheel,{passive:false});
   hit.addEventListener('keydown',event=>{if(event.key==='ArrowRight'||event.key==='ArrowLeft'){event.preventDefault();showPoint(activeIndex+(event.key==='ArrowRight'?1:-1));}if(event.key==='Escape')hidePoint();});
 }
 function renderNodes(){
   const nodes=state.data?.nodes || [];
   $('#nodes-grid').innerHTML=nodes.map(node=>`<article class="panel node-card"><div class="node-card-header"><div class="node-icon">${icon('server')}</div><div><h3>${esc(node.name)}${node.isLocal?'<span class="local-badge">本机</span>':''}</h3><span class="status-pill ${node.online?'healthy':'pending'}">${node.online?'在线':'离线'}</span></div>${node.isLocal?'':`<button class="icon-button delete-node" data-id="${esc(node.id)}" title="移除节点" aria-label="移除 ${esc(node.name)}">${icon('trash')}</button>`}</div><dl><dt>节点地址</dt><dd>${esc(node.address || '尚未配置')}</dd><dt>关联项目</dt><dd>${(state.data?.targets || []).filter(target=>target.nodeIds.includes(node.id)).length} 个</dd><dt>最近心跳</dt><dd>${esc(date(node.lastSeen,true))}</dd></dl><div class="node-card-footer"><button class="button node-targets" data-id="${esc(node.id)}">查看探测项目</button><button class="button node-add" data-id="${esc(node.id)}">${icon('plus')}分配新项目</button></div></article>`).join('') || `<div class="panel empty-state"><div class="empty-icon">${icon('nodes')}</div><h3>暂无探测节点</h3><p>启动监测中心或接入 Agent 后，节点会自动出现在这里。</p><a class="button" href="#settings">查看部署说明</a></div>`;
-  $$('.delete-node').forEach(button=>button.addEventListener('click',()=>{const node=nodes.find(item=>item.id===button.dataset.id);confirmAction('移除探测节点',`确定移除「${node.name}」？请先停止该节点的 Agent，避免它自动重新注册。关联项目将移除此执行节点。`,async()=>{await api(`/api/nodes/${encodeURIComponent(node.id)}`,{method:'DELETE'});if(state.node===node.id)state.node='';toast('节点已移除');await refresh();});}));
-  $$('.node-targets').forEach(button=>button.addEventListener('click',()=>{state.node=button.dataset.id;state.search=state.group=state.protocol='';location.hash='targets';renderFilters();renderTargets();refresh();}));
+  $$('.delete-node').forEach(button=>button.addEventListener('click',()=>{const node=nodes.find(item=>item.id===button.dataset.id);confirmAction('移除探测节点',`确定移除「${node.name}」？请先停止该节点的 Agent，避免它自动重新注册。关联项目将移除此执行节点。`,async()=>{await api(`/api/nodes/${encodeURIComponent(node.id)}`,{method:'DELETE'});if(state.node===node.id)setNodeFilter('');toast('节点已移除');await refresh();});}));
+  $$('.node-targets').forEach(button=>button.addEventListener('click',()=>{setNodeFilter(button.dataset.id);state.search=state.group=state.protocol='';location.hash='targets';renderFilters();renderTargets();refresh();}));
   $$('.node-add').forEach(button=>button.addEventListener('click',()=>openTarget(null,button.dataset.id)));
 }
 async function loadRecent(id,silent=false){
   state.historyTarget=id;const target=state.data?.targets.find(item=>item.id===id);if(!target)return;
-  $('#recent-panel').hidden=false;$('#recent-heading').textContent=`${target.name} · 最近探测记录`;
-  if(!silent)$('#recent-content').innerHTML='<div class="empty-state"><div class="loading-spinner"></div></div>';
-  try{const data=await api(`/api/targets/${encodeURIComponent(id)}/history?hours=${state.hours}${state.node?`&nodeId=${encodeURIComponent(state.node)}`:''}`);if(state.historyTarget!==id)return;state.history=data;
+  const requestScope=statisticsQuery(),requestSeq=++state.historyRequestSeq;
+  const isCurrent=()=>state.historyTarget===id&&statisticsQuery()===requestScope&&state.historyRequestSeq===requestSeq;
+  $('#recent-panel').hidden=false;$('#recent-heading').textContent=`${target.name} · 最近 ${windowLabel()} 的探测记录`;
+  if(!silent||!state.history)$('#recent-content').innerHTML='<div class="empty-state"><div class="loading-spinner"></div></div>';
+  try{const data=await api(`/api/targets/${encodeURIComponent(id)}/history?${requestScope}`);if(!isCurrent())return;state.history=data;
     const samples=data.recent || [];
     $('#recent-content').innerHTML=samples.length?`<div class="table-scroll"><table><thead><tr><th>时间</th><th>执行节点</th><th>延迟</th><th>结果</th><th>详细信息</th></tr></thead><tbody>${samples.map(sample=>`<tr><td>${esc(date(sample.timestamp,true))}</td><td>${esc(nodeName(sample.nodeId))}</td><td>${num(sample.latencyMs)}<span class="unit-muted">ms</span></td><td><span class="status-pill ${sample.success?(sample.suspectedRetransmit?'warning':'healthy'):'down'}">${sample.success?(sample.suspectedRetransmit?'疑似重传':'成功'):'失败'}</span></td><td title="${esc(sample.error)}">${esc(sample.error || '—')}</td></tr>`).join('')}</tbody></table></div>`:'<div class="empty-state"><h3>所选时段暂无探测记录</h3><p>请等待首次探测完成，或切换更长的时间范围。</p></div>';
-  }catch(error){if(!silent)$('#recent-content').innerHTML=`<div class="empty-state"><p>${esc(error.message)}</p></div>`;}
+  }catch(error){if(isCurrent()&&(!silent||!state.history))$('#recent-content').innerHTML=`<div class="empty-state"><p>${esc(error.message)}</p></div>`;}
 }
 function protocolFields(){const tcp=$('input[name=protocol]:checked').value==='tcp';$$('.tcp-field').forEach(element=>element.hidden=!tcp);$$('.icmp-field').forEach(element=>element.hidden=tcp);$('#target-size').required=!tcp;$('#target-size').disabled=tcp;for(const id of ['target-port','target-threshold','target-timeout']){$('#'+id).required=tcp;$('#'+id).disabled=!tcp;}}
 function nodeOptions(container,selected=[],mesh=false){container.innerHTML=(state.data?.nodes || []).map(node=>`<label class="checkbox-option"><input type="checkbox" value="${esc(node.id)}"${selected.includes(node.id)?' checked':''}${mesh&&!node.address?' disabled':''}><span>${esc(node.name)}</span><small>${mesh&&!node.address?'未配置地址':node.online?'在线':'离线'}</small></label>`).join('') || '<p class="field-help">尚无可用节点，请先检查监测中心。</p>';}
@@ -399,16 +520,38 @@ function renderSettings(){
 }
 function setToken(token){state.token=token.trim();if(state.token)sessionStorage.setItem('smartping.adminToken',state.token);else sessionStorage.removeItem('smartping.adminToken');}
 async function authenticate(event){event.preventDefault();setToken($('#auth-token').value);formError('#auth-error','');const button=$('button[type=submit]',$('#auth-form'));button.disabled=true;try{await api('/api/settings');$('#auth-dialog').close();state.settings=null;await refresh();toast('已连接监测中心');}catch(error){formError('#auth-error',error.message);}finally{button.disabled=false;}}
-function navigate(){let view=location.hash.slice(1);if(!labels[view])view='overview';state.view=view;$$('.view').forEach(section=>section.hidden=section.id!==`view-${view}`);$$('.nav-link').forEach(link=>{const active=link.dataset.view===view;link.classList.toggle('active',active);if(active)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');});$('#breadcrumb').textContent=labels[view];document.title=`${labels[view]} · SmartPing`;if(view==='settings')loadSettings();if(view==='trace'){renderTraceNodes();loadTraceTools();}}
+function navigate(){let view=location.hash.slice(1);if(!labels[view])view='overview';state.view=view;$$('.view').forEach(section=>section.hidden=section.id!==`view-${view}`);$$('.nav-link').forEach(link=>{const active=link.dataset.view===view;link.classList.toggle('active',active);if(active)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');});$('#breadcrumb').textContent=labels[view];document.title=`${labels[view]} · SmartPing`;if(view==='targets'&&state.historyTarget)loadRecent(state.historyTarget,true);if(view==='settings')loadSettings();if(view==='trace'){renderTraceNodes();loadTraceTools();}}
 function start(){
-  fillIcons();renderSummary();renderInitialError();renderFilters();renderTargets();renderSettings();renderTraceControls();navigate();
+  fillIcons();renderSummary();renderInitialError();renderFilters();renderTargets();renderSettings();renderTraceControls();navigate();renderStatisticsControls();
+  $('#custom-range-minutes').value=state.window.kind==='minutes'?state.window.value:60;$('#bucket-seconds').value=state.bucketSeconds;
+  $('#latency-axis-mode').value=state.latencyAxis.mode;$('#latency-axis-max').value=state.latencyAxis.maximumMs;latencyAxisFields();
   $$('.add-target').forEach(button=>button.addEventListener('click',()=>openTarget()));
   $$('.close-modal').forEach(button=>button.addEventListener('click',()=>button.closest('dialog').close()));
   $$('dialog').forEach(dialog=>dialog.addEventListener('click',event=>{if(event.target===dialog&&dialog.id!=='auth-dialog'){const rect=dialog.getBoundingClientRect();if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom)dialog.close();}}));
   $('#auth-dialog').addEventListener('cancel',event=>event.preventDefault());
   $('#refresh-button').addEventListener('click',()=>refresh());$('#retry-button').addEventListener('click',()=>refresh());
-  $$('.range-selector button').forEach(button=>button.addEventListener('click',()=>{state.hours=Number(button.dataset.hours);$$('.range-selector button').forEach(item=>item.classList.toggle('active',item===button));refresh();}));
-  $('#chart-target').addEventListener('change',event=>{state.selected=event.target.value;renderChart();renderTargets();});
+  $('#statistics-toggle').addEventListener('click',toggleStatisticsSettings);
+  $$('.range-selector button').forEach(button=>button.addEventListener('click',()=>{const isMinutes=!!button.dataset.minutes,value=Number(isMinutes?button.dataset.minutes:button.dataset.hours);if(isMinutes)$('#custom-range-minutes').value=value;statisticsError('#custom-range-minutes','#custom-range-error');updateStatistics({window:{kind:isMinutes?'minutes':'hours',value}});}));
+  $('#custom-range-form').addEventListener('submit',event=>{
+    event.preventDefault();const raw=$('#custom-range-minutes').value;
+    if(!validPositiveInteger(raw,60))return statisticsError('#custom-range-minutes','#custom-range-error','请输入 1–60 分钟的纯数字整数，禁止空格、小数、正负号和特殊字符。');
+    statisticsError('#custom-range-minutes','#custom-range-error');updateStatistics({window:{kind:'minutes',value:Number(raw)}});
+  });
+  $('#bucket-interval-form').addEventListener('submit',event=>{
+    event.preventDefault();const raw=$('#bucket-seconds').value;
+    if(!validPositiveInteger(raw,3600))return statisticsError('#bucket-seconds','#bucket-error','请输入 1–3,600 秒的纯数字整数，禁止空格、小数、正负号和特殊字符。');
+    statisticsError('#bucket-seconds','#bucket-error');updateStatistics({bucketSeconds:Number(raw)});
+  });
+  bindStatisticsInput('#custom-range-minutes','#custom-range-error','统计周期仅允许纯数字整数，范围为 1–60 分钟。');
+  bindStatisticsInput('#bucket-seconds','#bucket-error','统计间隔仅允许纯数字整数，范围为 1–3,600 秒。');
+  $('#latency-axis-form').addEventListener('submit',applyLatencyAxis);$('#latency-axis-mode').addEventListener('change',latencyAxisFields);
+  const latencyInput=$('#latency-axis-max');
+  function rejectLatencyCharacters(event,inserted){if(typeof inserted==='string'&&/[^0-9.]/.test(inserted)){event.preventDefault();statisticsError('#latency-axis-max','#latency-axis-error','纵轴上限仅允许 ASCII 数字和小数点，最多 3 位小数。');}}
+  latencyInput.addEventListener('beforeinput',event=>rejectLatencyCharacters(event,event.data??event.dataTransfer?.getData('text/plain')));
+  latencyInput.addEventListener('paste',event=>rejectLatencyCharacters(event,event.clipboardData?.getData('text')));
+  latencyInput.addEventListener('drop',event=>rejectLatencyCharacters(event,event.dataTransfer?.getData('text/plain')));
+  latencyInput.addEventListener('input',()=>statisticsError('#latency-axis-max','#latency-axis-error'));
+  $('#chart-target').addEventListener('change',event=>selectTarget(event.target.value));
   $('#target-form').addEventListener('submit',saveTarget);$$('input[name=protocol]').forEach(input=>input.addEventListener('change',protocolFields));
   $('#trace-form').addEventListener('submit',startTrace);$('#cancel-trace').addEventListener('click',cancelTrace);
   $('#trace-node').addEventListener('change',()=>{if(!traceState.job){$('#trace-source-label').textContent=traceNodeLabel($('#trace-node').value);renderTraceTool();}renderTraceControls();});

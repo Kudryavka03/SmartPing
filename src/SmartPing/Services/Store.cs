@@ -10,7 +10,8 @@ public sealed record ProbeStats(long Sent, long Received, double LossPercent, do
     double? LastLatencyMs, DateTimeOffset? LastSeen, string Status, int MissingSources, long AvgLatencySampleCount);
 public sealed record SeriesPoint(DateTimeOffset Timestamp, double? LatencyMs, double? MinLatencyMs,
     double? MaxLatencyMs, double LossPercent, double RetransmitPercent, long Sent);
-public sealed record ProbeHistory(ProbeStats Stats, IReadOnlyList<SeriesPoint> Series, IReadOnlyList<ProbeSample> Recent);
+public sealed record ProbeHistory(ProbeStats Stats, IReadOnlyList<SeriesPoint> Series, IReadOnlyList<ProbeSample> Recent,
+    int BucketSeconds);
 
 public sealed class Store
 {
@@ -217,8 +218,10 @@ public sealed class Store
         }
     }
 
-    public ProbeHistory GetHistory(TargetConfig target, double hours, string? nodeId, bool includeRecent = true)
+    public ProbeHistory GetHistory(TargetConfig target, double hours, string? nodeId, bool includeRecent = true,
+        int? bucketSeconds = null, int maxPoints = HistoryQuery.MaximumChartPoints)
     {
+        var effectiveBucketSeconds = HistoryQuery.ResolveBucketSeconds(hours, bucketSeconds, maxPoints);
         var now = DateTimeOffset.UtcNow;
         var since = now.AddHours(-hours).ToUnixTimeMilliseconds();
         using var db = Open();
@@ -286,8 +289,8 @@ public sealed class Store
         var stats = new ProbeStats(sent, received, loss, avg, min, max, jitter,
             sent > 0 ? 100.0 * retransmit / sent : 0, lastLatency, lastSeen, status, missingSources, averageSampleCount);
 
-        // Bound every response to about 240 buckets; preserve loss, extrema and average within each bucket.
-        var bucketMs = Math.Max(1000L, (long)(hours * 3600000 / 240));
+        // Keep the chosen short-window resolution; disclose any coarsening needed for bounded responses.
+        var bucketMs = (long)effectiveBucketSeconds * 1000;
         command.Parameters.AddWithValue("$bucket", bucketMs);
         command.CommandText = $"""
             SELECT (timestamp/$bucket)*$bucket,AVG({averageLatency}),MIN(latency),MAX(latency),COUNT(*),SUM(success),SUM(retransmit)
@@ -313,7 +316,7 @@ public sealed class Store
                 DateTimeOffset.FromUnixTimeMilliseconds(reader.GetInt64(3)), NullableDouble(reader, 4), reader.GetBoolean(5),
                 reader.GetBoolean(6), reader.IsDBNull(7) ? null : reader.GetString(7)));
         }
-        return new(stats, series, recent);
+        return new(stats, series, recent, effectiveBucketSeconds);
     }
 
     private static double? NullableDouble(SqliteDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetDouble(ordinal);

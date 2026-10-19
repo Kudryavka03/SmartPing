@@ -73,6 +73,7 @@ try
     TraceCoordinatorTests.Run();
     TcpAverageTests.Run();
     TcpJitterTests.Run();
+    HistoryWindowTests.Run();
     Console.WriteLine($"All {passed} storage/validation checks, probe checks and traceroute checks passed.");
 }
 finally
