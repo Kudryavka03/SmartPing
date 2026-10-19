@@ -1,6 +1,6 @@
 :root {
   --sidebar-width: 224px;
-  --sidebar-rail-width: 14px;
+  --sidebar-rail-width: 44px;
   --sidebar-space: var(--sidebar-width);
   --sidebar-mobile-space: 57px;
 }
@@ -27,6 +27,7 @@
 
 .toast-region {
   left: calc((100% + var(--sidebar-space)) / 2);
+  max-width: calc(100% - var(--sidebar-space) - 30px);
   transition: left .22s ease, bottom .22s ease;
 }
 
@@ -81,38 +82,75 @@
   background: #f8fafb;
 }
 
-.sidebar-reopen[hidden], .sidebar-edge[hidden] {
+.sidebar-reopen[hidden], .sidebar-rail[hidden] {
   display: none;
 }
 
-.sidebar-edge {
+.sidebar-rail {
   position: fixed;
   z-index: 40;
   inset: 0 auto 0 0;
   width: var(--sidebar-rail-width);
-  min-width: var(--sidebar-rail-width);
-  min-height: 0;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  appearance: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 4px;
+  overflow-y: auto;
   background: var(--side);
-  color: #a8ded7;
-  box-shadow: none;
+  color: #a7b5c3;
 }
 
-.sidebar-edge svg {
-  width: 12px;
-  height: 12px;
+.sidebar-rail-expand {
+  width: 36px;
+  height: 36px;
+  min-height: 36px;
+  margin-bottom: 8px;
+  color: #a7b5c3;
 }
 
-.sidebar-edge:hover {
+.sidebar-rail-expand:hover, .sidebar-rail .nav-link:hover {
   background: #203949;
-  color: #d3f6ef;
+  color: #b2e7df;
 }
 
-.sidebar-edge:focus-visible {
-  outline-offset: -3px;
+.sidebar-rail .nav-link {
+  display: flex;
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
+  gap: 0;
+  flex: none;
+  width: 36px;
+  height: 36px;
+  padding: 9px;
+  border-radius: 6px;
+  font-size: 0;
+  line-height: 1;
+  color: #849bab;
+}
+
+.sidebar-rail .nav-link svg {
+  width: 18px;
+  height: 18px;
+  color: inherit;
+}
+
+.sidebar-rail .nav-link.active {
+  background: #1c3c48;
+  color: #71d3c9;
+}
+
+.sidebar-rail .nav-link.active:before {
+  top: 8px;
+  left: -4px;
+  width: 3px;
+  height: 20px;
+  border-radius: 0 3px 3px 0;
+}
+
+.sidebar-rail .nav-link:focus-visible, .sidebar-rail-expand:focus-visible {
+  outline-offset: 0;
 }
 
 .topbar-leading {

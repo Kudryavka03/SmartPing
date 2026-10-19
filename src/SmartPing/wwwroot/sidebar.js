@@ -36,7 +36,7 @@
     icon.setAttribute('aria-hidden', 'true');
 
     const frame = document.createElementNS(svgNamespace, 'path');
-    frame.setAttribute('d', className === 'sidebar-edge' ? '' : 'M8 4H4v16h4');
+    frame.setAttribute('d', 'M8 4H4v16h4');
     const arrow = document.createElementNS(svgNamespace, 'path');
     arrow.classList.add('sidebar-toggle-arrow');
     icon.append(frame, arrow);
@@ -60,8 +60,26 @@
   breadcrumbs.before(leading);
   leading.append(topbarButton, breadcrumbs);
 
-  const edgeButton = createToggle('sidebar-edge');
-  document.body.append(edgeButton);
+  const rail = document.createElement('nav');
+  rail.className = 'sidebar-rail';
+  rail.setAttribute('aria-label', '快捷导航');
+  const edgeButton = createToggle('sidebar-rail-expand');
+  rail.append(edgeButton);
+  for (const source of sidebar.querySelectorAll('nav .nav-link')) {
+    const shortcut = document.createElement('a');
+    shortcut.className = `nav-link sidebar-rail-link${source.classList.contains('active') ? ' active' : ''}`;
+    shortcut.setAttribute('href', source.getAttribute('href'));
+    shortcut.dataset.view = source.dataset.view;
+    const label = [...source.childNodes].filter(node => node.nodeType === 3)
+      .map(node => node.textContent).join('').trim();
+    shortcut.title = label;
+    shortcut.setAttribute('aria-label', label);
+    if (source.getAttribute('aria-current')) shortcut.setAttribute('aria-current', source.getAttribute('aria-current'));
+    const sourceIcon = source.querySelector('svg');
+    if (sourceIcon) shortcut.append(sourceIcon.cloneNode(true));
+    rail.append(shortcut);
+  }
+  document.body.append(rail);
 
   function expandedFocusControl() {
     return mobile.matches ? sidebar.querySelector('.nav-link') || topbarButton : closeButton;
@@ -78,12 +96,12 @@
       button.setAttribute('aria-expanded', String(!collapsed));
       button.setAttribute('aria-label', label);
       button.title = label;
-      button.querySelector('.sidebar-toggle-arrow').setAttribute('d', button === edgeButton
-        ? 'M9 6l6 6-6 6'
-        : collapsed ? 'M12 7l5 5-5 5M9 12h8' : 'M16 7l-5 5 5 5M11 12h8');
+      button.querySelector('.sidebar-toggle-arrow').setAttribute('d', collapsed
+        ? 'M12 7l5 5-5 5M9 12h8' : 'M16 7l-5 5 5 5M11 12h8');
     }
-    topbarButton.hidden = !collapsed && !mobile.matches;
-    edgeButton.hidden = !collapsed;
+    topbarButton.hidden = collapsed || !mobile.matches;
+    rail.hidden = !collapsed;
+    rail.inert = !collapsed;
   }
 
   function setCollapsed(value, focusControl = false) {
@@ -111,7 +129,7 @@
   window.addEventListener('storage', event => {
     if (event.key !== storageKey) return;
     const restoreFocus = sidebar.contains(document.activeElement)
-      || document.activeElement === topbarButton || document.activeElement === edgeButton;
+      || document.activeElement === topbarButton || rail.contains(document.activeElement);
     setCollapsed(event.newValue === 'true', restoreFocus);
   });
 
