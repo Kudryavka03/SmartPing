@@ -47,8 +47,8 @@ public static class TcpAverageTests
                   && mixedHistory.Stats.LossPercent == 25 && mixedHistory.Stats.RetransmitPercent == 25,
                 "Excluding suspected retransmissions from TCP mean preserves delivery and retransmission statistics");
             Check(mixedHistory.Stats.MinLatencyMs == 10 && mixedHistory.Stats.MaxLatencyMs == 500
-                  && mixedHistory.Stats.JitterMs == 470,
-                "TCP minimum, maximum and per-node jitter retain suspected retransmission latency");
+                  && mixedHistory.Stats.JitterMs is null,
+                "TCP extrema retain suspected retransmission latency while jitter requires eligible adjacent replies");
             Check(mixedHistory.Recent.Single(s => s.Id == "tcp-suspected-500") is
                   { LatencyMs: 500, Success: true, SuspectedRetransmit: true }
                   && mixedHistory.Recent.Count == 4,
@@ -83,8 +83,8 @@ public static class TcpAverageTests
             Check(allHistory.Series.Count == 1 && allHistory.Series[0] is
                   { LatencyMs: null, MinLatencyMs: 400, MaxLatencyMs: 600, LossPercent: 0, RetransmitPercent: 100 },
                 "An all-suspected TCP chart bucket has a null mean and retains its other metrics");
-            Check(allHistory.Stats.JitterMs == 200 && allHistory.Stats.LastLatencyMs == 600,
-                "All-suspected TCP history still preserves jitter and the latest actual latency");
+            Check(allHistory.Stats.JitterMs is null && allHistory.Stats.LastLatencyMs == 600,
+                "All-suspected TCP history has unavailable jitter and preserves the latest actual latency");
 
             var empty = mixed with { Id = "tcp-average-empty", Name = "No samples" };
             store.SaveTarget(empty);

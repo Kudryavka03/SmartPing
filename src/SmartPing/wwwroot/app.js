@@ -156,8 +156,8 @@ function renderChart(){
   const target=targets.find(item=>item.id===state.selected),badge=$('#chart-protocol');badge.hidden=!target;
   if(target){badge.textContent=target.protocol==='tcp'?'TCP':'ICMP';badge.className=`protocol-badge ${target.protocol}`;}
   const stats=target?.stats || {};
-  const metrics=[['最小延迟',stats.minLatencyMs,'ms'],['最大延迟',stats.maxLatencyMs,'ms'],['平均抖动',stats.jitterMs,'ms'],['成功 / 总探测',`${int(stats.received)} / ${int(stats.sent)}`,''],target?.protocol==='tcp'?['疑似重传率',stats.retransmitPercent,'%']:['最近延迟',stats.lastLatencyMs,'ms']];
-  $('#detail-metrics').innerHTML=metrics.map(([label,value,unit])=>`<div class="detail-metric"><span>${label}</span><strong>${typeof value==='string'?value:num(value)}<small>${unit}</small></strong></div>`).join('');
+  const metrics=[['最小延迟',stats.minLatencyMs,'ms'],['最大延迟',stats.maxLatencyMs,'ms'],['平均抖动',stats.jitterMs,'ms','同一节点连续两次有效探测的延迟差绝对值均值；排除 TCP 疑似重传，且不跨过失败、缺失延迟或 TCP 疑似重传样本配对。'],['成功 / 总探测',`${int(stats.received)} / ${int(stats.sent)}`,''],target?.protocol==='tcp'?['疑似重传率',stats.retransmitPercent,'%']:['最近延迟',stats.lastLatencyMs,'ms']];
+  $('#detail-metrics').innerHTML=metrics.map(([label,value,unit,title])=>`<div class="detail-metric"${title?` title="${esc(title)}"`:''}><span>${label}</span><strong>${typeof value==='string'?value:num(value)}<small>${unit}</small></strong></div>`).join('');
   const series=(target?.series || []).filter(point=>point.timestamp).sort((a,b)=>new Date(a.timestamp)-new Date(b.timestamp));
   if(!series.length){$('#chart-bucket-info').textContent='';$('#chart-content').innerHTML=`<div class="chart-empty"><div class="empty-state"><div class="empty-icon">${icon('chart')}</div><h3>${target?'等待探测数据':'让网络表现有迹可循'}</h3><p>${target?(target.enabled?'首次探测完成后，这里将展示真实的延迟与丢包历史。':'此项目已暂停，可在项目列表中重新启用。'):'创建探测项目后，在这里查看延迟趋势、丢包和链路波动。'}</p></div></div>`;return;}
   drawChart(series,target);

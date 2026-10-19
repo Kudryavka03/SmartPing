@@ -217,8 +217,11 @@ try {
         @{ targetId = $averageTargets.icmp.id; latencyMs = 100; success = $true },
         @{ targetId = $averageTargets.icmp.id; latencyMs = 100; success = $true }
     )
+    $averageSequence = 0
     foreach ($sample in $averageSamples) {
-        $sample.id = [Guid]::NewGuid().ToString('N')
+        # Samples share a chart bucket; deterministic IDs also preserve their probe order for jitter.
+        $sample.id = ('average-{0:D2}-' -f $averageSequence) + [Guid]::NewGuid().ToString('N')
+        $averageSequence++
         $sample.nodeId = $averageNodeId
         $sample.timestamp = $averageTimestamp
         $sample.suspectedRetransmit = $false
@@ -230,6 +233,8 @@ try {
     $mixedHistory = Get-History $averageTargets.mixed.id
     Assert-Check ($mixedHistory.stats.avgLatencyMs -eq 20 -and $mixedHistory.stats.avgLatencySampleCount -eq 2) `
         'TCP average excludes suspected retransmits and exposes the two eligible samples'
+    Assert-Check ($mixedHistory.stats.jitterMs -eq 20) `
+        'TCP jitter uses the adjacent normal replies and excludes the subsequent suspected retransmit'
     Assert-Check ($mixedHistory.stats.sent -eq 4 -and $mixedHistory.stats.received -eq 3 -and
         $mixedHistory.stats.lossPercent -eq 25 -and $mixedHistory.stats.retransmitPercent -eq 25) `
         'Excluding retransmits from TCP average preserves sent, received, loss and retransmit counts'
@@ -243,6 +248,8 @@ try {
         'TCP chart bucket average excludes retransmits while preserving loss, retransmits and extrema'
 
     $suspectHistory = Get-History $averageTargets.suspectOnly.id
+    Assert-Check ($null -eq $suspectHistory.stats.jitterMs) `
+        'Retransmit-only TCP history has no valid jitter pair'
     Assert-Check ($null -eq $suspectHistory.stats.avgLatencyMs -and $suspectHistory.stats.avgLatencySampleCount -eq 0 -and
         $suspectHistory.stats.sent -eq 1 -and $suspectHistory.stats.received -eq 1 -and
         $suspectHistory.stats.lossPercent -eq 0 -and $suspectHistory.stats.retransmitPercent -eq 100) `
@@ -255,6 +262,8 @@ try {
         'Retransmit-only chart bucket has a null average while raw latency and extrema remain'
 
     $icmpAverageHistory = Get-History $averageTargets.icmp.id
+    Assert-Check ($icmpAverageHistory.stats.jitterMs -eq 0) `
+        'Equal adjacent ICMP replies preserve a genuine zero jitter'
     Assert-Check ($icmpAverageHistory.stats.avgLatencyMs -eq 100 -and $icmpAverageHistory.stats.avgLatencySampleCount -eq 2 -and
         $icmpAverageHistory.stats.received -eq 2 -and $icmpAverageHistory.stats.retransmitPercent -eq 0 -and
         @($icmpAverageHistory.series).Count -eq 1 -and $icmpAverageHistory.series[0].latencyMs -eq 100) `
@@ -268,6 +277,8 @@ try {
     Assert-Check ($mixedCard.stats.avgLatencyMs -eq 20 -and $mixedCard.stats.avgLatencySampleCount -eq 2 -and
         $mixedCard.series[0].latencyMs -eq 20) `
         'Dashboard target card exposes the same eligible count and average as history'
+    Assert-Check ($mixedCard.stats.jitterMs -eq 20) `
+        'Link performance dashboard exposes the corrected TCP average jitter'
     $otherNodeHistory = (Invoke-Api "/api/targets/$($averageTargets.mixed.id)/history?nodeId=$emptyAverageNodeId").Body
     Assert-Check ($null -eq $otherNodeHistory.stats.avgLatencyMs -and $otherNodeHistory.stats.avgLatencySampleCount -eq 0 -and
         $otherNodeHistory.stats.sent -eq 0 -and @($otherNodeHistory.series).Count -eq 0) `

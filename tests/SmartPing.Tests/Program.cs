@@ -72,6 +72,7 @@ try
     await TraceRunnerTests.RunAsync();
     TraceCoordinatorTests.Run();
     TcpAverageTests.Run();
+    TcpJitterTests.Run();
     Console.WriteLine($"All {passed} storage/validation checks, probe checks and traceroute checks passed.");
 }
 finally

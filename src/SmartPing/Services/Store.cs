@@ -247,7 +247,8 @@ public sealed class Store
         }
         command.CommandText = $"""
             SELECT AVG(ABS(latency-previous)) FROM
-            (SELECT latency,LAG(latency) OVER(PARTITION BY node_id ORDER BY timestamp,id) AS previous
+            (SELECT {averageLatency} AS latency,
+                LAG({averageLatency}) OVER(PARTITION BY node_id ORDER BY timestamp,id) AS previous
             FROM samples WHERE {filter});
             """;
         var jitterValue = command.ExecuteScalar();
